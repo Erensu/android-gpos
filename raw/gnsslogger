@@ -1,0 +1,534 @@
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.location.GnssClock;
+import android.location.GnssMeasurement;
+import android.location.GnssMeasurementsEvent;
+import android.location.GnssNavigationMessage;
+import android.location.GnssStatus;
+import android.location.Location;
+import android.location.LocationManager;
+import android.os.Build;
+import android.os.Build.VERSION_CODES;
+import android.os.Bundle;
+import android.os.SystemClock;
+import android.support.annotation.RequiresApi;
+import android.util.Log;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.concurrent.locks.ReentrantLock;
+
+/**
+ * A GNSS logger to store information to a file.
+ */
+public class GnssLogger implements GnssListener {
+
+    private static final String TAG = "GnssLogger";
+    private static final String FILE_PREFIX = "gnss_log";
+
+    private static final String ERROR_WRITING_FILE = "Problem writing to file.";
+    private static final String WARNING_NOYIMPLEMENTED = "Not Implemented";
+    private static int gMeasCnt = 0;
+
+    private final Context mContext;
+    private String mStrBuff = "";
+
+    private BufferedWriter mRawFileWriter;
+    private BufferedWriter mPosFileWriter;
+    private BufferedWriter mNLPFileWriter;
+    private BufferedWriter mNMAFileWriter;
+
+    private File mRawFile;
+    private File mPosFile;
+    private File mNLPFile;
+    private File mNMAFile;
+
+    private int mRawOpenFile = 0;
+    private int mPosOpenFile = 0;
+    private int mNLPOpenFile = 0;
+    private int mNMAOpenFile = 0;
+    private boolean isWriteLog = true;
+    private boolean isWritetoFile = true;
+    private ReentrantLock reentrantLock = new ReentrantLock();
+
+    public GnssLogger(Context context) {
+        this.mContext = context;
+    }
+
+    /**
+     * Start a new file logging process.
+     */
+    public void startNewLog() {
+        /* Initial Log File Contents */
+        if (isWritetoFile) {
+            mRawOpenFile = initLogFileContents();
+        }
+        if (isWritetoFile) {
+            mPosOpenFile = initPosFileContents();
+        }
+        if (isWritetoFile) {
+            mNLPOpenFile = initNLPFileContents();
+        }
+        if (isWritetoFile) {
+            mNMAOpenFile = initNMAFileContents();
+        }
+    }
+
+    @Override
+    public void onProviderEnabled(String provider) {
+        logWarn(provider + WARNING_NOYIMPLEMENTED);
+    }
+
+    @Override
+    public void onProviderDisabled(String provider) {
+        logWarn(provider + WARNING_NOYIMPLEMENTED);
+    }
+
+    @Override
+    public void onLocationChanged(Location location) {
+        if (location.getProvider().equals(LocationManager.GPS_PROVIDER)) {
+            String locationStream = "";
+            if (isWriteLog) {
+                locationStream = String.format(Locale.US,
+                        "Fix,%s,%f,%f,%f,%f,%f,%f,%d,%d%n",
+                        location.getProvider(),
+                        location.getLatitude(),
+                        location.getLongitude(),
+                        location.getAltitude(),
+                        location.getSpeed(),
+                        location.getAccuracy(),
+                        location.getBearing(),
+                        System.currentTimeMillis(),
+                        location.getTime());
+            }
+            if (mPosFileWriter != null && mPosOpenFile != 0) {
+                try {
+                    mPosFileWriter.write(locationStream);
+                    mPosFileWriter.newLine();
+                    mPosFileWriter.flush();
+                } catch (IOException e) {
+                    logException(ERROR_WRITING_FILE, e);
+                }
+            }
+            reentrantLock.lock();
+        }
+        if (location.getProvider().equals(LocationManager.NETWORK_PROVIDER)) {
+            String locationStream = "";
+
+            if (isWriteLog) {
+                locationStream =
+                        String.format(Locale.US,
+                                "NLP,%s,%f,%f,%f,%f,%f,%f,%d,%d%n",
+                                location.getProvider(),
+                                location.getLatitude(),
+                                location.getLongitude(),
+                                location.getAltitude(),
+                                location.getSpeed(),
+                                location.getAccuracy(),
+                                location.getBearing(),
+                                System.currentTimeMillis(),
+                                location.getTime());
+            }
+            if (mNLPFileWriter != null && mNLPOpenFile != 0) {
+                try {
+                    mNLPFileWriter.write(locationStream);
+                    mNLPFileWriter.newLine();
+                    mNLPFileWriter.flush();
+                } catch (IOException e) {
+                    logException(ERROR_WRITING_FILE, e);
+                }
+            }
+            reentrantLock.lock();
+        }
+    }
+
+    @Override
+    public void onLocationStatusChanged(String provider, int status, Bundle extras) {
+        logWarn(provider + WARNING_NOYIMPLEMENTED);
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.N)
+    @Override
+    public void onGnssMeasurementsReceived(GnssMeasurementsEvent event) {
+        gMeasCnt = event.getMeasurements().size();
+
+        GnssClock gnssClock = event.getClock();
+        if (mRawFileWriter != null) {
+            for (GnssMeasurement measurement : event.getMeasurements()) {
+                updGnssMeasStr(gnssClock, measurement);
+                try {
+                    if (writeGnssMeasurementToFile(gnssClock, measurement) == 0) {
+                        logError(ERROR_WRITING_FILE);
+                    }
+                } catch (IOException e) {
+                    logException(ERROR_WRITING_FILE, e);
+                }
+            }
+        }
+        int i = 0;
+        int mMeasCnt = event.getMeasurements().size();
+
+        reentrantLock.lock();
+
+        try {
+            mStrBuff = "";
+            for (GnssMeasurement measurement : event.getMeasurements()) {
+                if (isWriteLog) {
+                    updGnssMeasStr(gnssClock, measurement);
+                }
+                if (++i == mMeasCnt) {
+                    if (isWriteLog) {
+                        mStrBuff += ",EPOCHEND\n";
+                    }
+                } else {
+                    if (isWriteLog) {
+                        mStrBuff += "\n";
+                    }
+                }
+            }
+        } finally {
+            reentrantLock.unlock();
+        }
+    }
+
+    @Override
+    public void onGnssMeasurementsStatusChanged(int status) {
+    }
+
+    @Override
+    public void onGnssNavigationMessageReceived(GnssNavigationMessage navigationMessage) {
+
+    }
+
+    @Override
+    public void onGnssNavigationMessageStatusChanged(int status) {
+        logWarn("Gnss Navigation Message Status Changed");
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.O)
+    @Override
+    public void onGnssStatusChanged(GnssStatus gnssStatus) {
+
+    }
+
+    @Override
+    public void onNmeaReceived(long timestamp, String s) {
+        if (mNMAFileWriter == null) {
+            return;
+        }
+        try {
+            mNMAFileWriter.write(s);
+            mNMAFileWriter.newLine();
+            mNMAFileWriter.flush();
+        } catch (IOException e) {
+            logException(ERROR_WRITING_FILE, e);
+        }
+    }
+
+    @Override
+    public void onListenerRegistration(String listener, boolean result) {
+    }
+
+    @Override
+    public void onTTFFReceived(long l) {
+    }
+
+    static synchronized int getgMeasCnt() {
+        return gMeasCnt;
+    }
+
+    private void closeRawFile() {
+        if (mRawFile == null || mRawOpenFile == 0) {
+            return;
+        }
+        if (mRawFileWriter != null) {
+            try {
+                mRawFileWriter.flush();
+                mRawFileWriter.close();
+                mRawFileWriter = null;
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+                return;
+            }
+        }
+    }
+
+    private void closePosFile() {
+        if (mPosFile == null || mPosOpenFile == 0) {
+            return;
+        }
+        if (mPosFileWriter != null) {
+            try {
+                mPosFileWriter.flush();
+                mPosFileWriter.close();
+                mPosFileWriter = null;
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+            }
+        }
+    }
+
+    private void closeNmaFile() {
+        if (mNMAFile == null || mNMAOpenFile == 0) {
+            return;
+        }
+        if (mNMAFileWriter != null) {
+            try {
+                mNMAFileWriter.flush();
+                mNMAFileWriter.close();
+                mNMAFileWriter = null;
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+            }
+        }
+    }
+
+    private void closeNLPFile() {
+        if (mNLPFile == null || mNLPOpenFile == 0) {
+            return;
+        }
+        if (mNLPFileWriter != null) {
+            try {
+                mNLPFileWriter.flush();
+                mNLPFileWriter.close();
+                mNLPFileWriter = null;
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+            }
+        }
+    }
+
+    public void close() {
+        closeRawFile();
+        closePosFile();
+        closeNmaFile();
+        closeNLPFile();
+    }
+
+    @RequiresApi(api = VERSION_CODES.N)
+    private synchronized String updGnssMeasStrClock(GnssClock clock) {
+        String clockStream = String.format("Raw,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
+                SystemClock.elapsedRealtime(),
+                clock.getTimeNanos(),
+                clock.hasLeapSecond() ? clock.getLeapSecond() : "",
+                clock.hasTimeUncertaintyNanos() ? clock.getTimeUncertaintyNanos() : "",
+                clock.getFullBiasNanos(),
+                clock.hasBiasNanos() ? clock.getBiasNanos() : "",
+                clock.hasBiasUncertaintyNanos() ? clock.getBiasUncertaintyNanos() : "",
+                clock.hasDriftNanosPerSecond() ? clock.getDriftNanosPerSecond() : "",
+                clock.hasDriftUncertaintyNanosPerSecond() ? clock.getDriftUncertaintyNanosPerSecond() : "",
+                clock.getHardwareClockDiscontinuityCount() + ",");
+        return clockStream;
+    }
+
+    @RequiresApi(api = VERSION_CODES.N)
+    private synchronized String updGnssMeasStrMeas1(GnssClock clock, GnssMeasurement measurement) {
+        String measurementStream =
+                String.format("%s,%s,%s,%s,%s,%s,",
+                        measurement.getSvid(),
+                        measurement.getTimeOffsetNanos(),
+                        measurement.getState(),
+                        measurement.getReceivedSvTimeNanos(),
+                        measurement.getReceivedSvTimeUncertaintyNanos(),
+                        measurement.getCn0DbHz());
+        return measurementStream;
+    }
+
+    @RequiresApi(api = VERSION_CODES.N)
+    private synchronized String updGnssMeasStrMeas2(GnssClock clock, GnssMeasurement measurement) {
+
+        String carrierFrequencyHz = measurement.hasCarrierFrequencyHz() ? String
+                .valueOf(measurement.getCarrierFrequencyHz()) : "";
+        String carrierCycles = measurement.hasCarrierCycles() ? String.valueOf(measurement.getCarrierCycles()) : "";
+        String carrierPhase = measurement.hasCarrierPhase() ? String.valueOf(measurement.getCarrierPhase()) : "";
+        String carrierPhaseUncertainty = measurement.hasCarrierPhaseUncertainty() ? String
+                .valueOf(measurement.getCarrierPhaseUncertainty()) : "";
+        String snrInDb = measurement.hasSnrInDb() ? String.valueOf(measurement.getSnrInDb()) : "";
+        String automaticGainControlLevelDb =
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && measurement.hasAutomaticGainControlLevelDb()
+                        ? String.valueOf(measurement.getAutomaticGainControlLevelDb()) : "";
+        String leapSecond = clock.hasLeapSecond() ? String.valueOf(clock.getLeapSecond()) : "";
+
+        String measurementStream =
+                String.format("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
+                        measurement.getPseudorangeRateMetersPerSecond(),
+                        measurement.getPseudorangeRateUncertaintyMetersPerSecond(),
+                        measurement.getAccumulatedDeltaRangeState(),
+                        measurement.getAccumulatedDeltaRangeMeters(),
+                        measurement.getAccumulatedDeltaRangeUncertaintyMeters(),
+                        carrierFrequencyHz,
+                        carrierCycles,
+                        carrierPhase,
+                        carrierPhaseUncertainty,
+                        measurement.getMultipathIndicator(),
+                        snrInDb,
+                        measurement.getConstellationType(),
+                        automaticGainControlLevelDb,
+                        carrierFrequencyHz,
+                        leapSecond);
+        return measurementStream;
+    }
+
+    @RequiresApi(api = VERSION_CODES.N)
+    private synchronized String updGnssMeasStrMeas(GnssClock clock, GnssMeasurement measurement) {
+        String measurementStream = "";
+
+        measurementStream = updGnssMeasStrMeas1(clock, measurement) + updGnssMeasStrMeas2(clock, measurement);
+        return measurementStream;
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.N)
+    private synchronized void updGnssMeasStr(GnssClock clock, GnssMeasurement measurement) {
+        String clockStream = updGnssMeasStrClock(clock);
+        String measurementStream = updGnssMeasStrMeas(clock, measurement);
+        String utcTimeStream = Long.toString(System.currentTimeMillis());
+
+        double sow = getCurrSow();
+        mStrBuff = clockStream + measurementStream + "," + sow + "," + utcTimeStream;
+    }
+    private synchronized int writeGnssMeasurementToFile(GnssClock clock, GnssMeasurement measurement)
+            throws IOException {
+
+        if (mRawOpenFile == 0) {
+            return 0;
+        }
+        mRawFileWriter.write(mStrBuff);
+        mRawFileWriter.newLine();
+        mRawFileWriter.flush();
+        return 1;
+    }
+
+    private void logException(String errorMessage, Exception e) {
+        Log.e(TAG, errorMessage, e);
+        if (TxLog.Debug) {
+            TxLog.i(TAG, errorMessage);
+        }
+    }
+
+    private void logError(String errorMessage) {
+        Log.e(TAG, errorMessage);
+        if (TxLog.Debug) {
+            TxLog.i(TAG, errorMessage);
+        }
+    }
+
+    private void logWarn(String warnMessage) {
+        Log.w(TAG, warnMessage);
+    }
+
+    private int initLogFileContents() {
+        File file = mContext.getExternalFilesDir("dgnss");
+
+        @SuppressLint("SimpleDateFormat") SimpleDateFormat formatter = new SimpleDateFormat("yyy_MM_dd_HH_mm_ss");
+        Date now = new Date();
+        String fileName = String.format("%s_%s.raw", FILE_PREFIX, formatter.format(now));
+        File currentFile = new File(file, fileName);
+        String currentFilePath = currentFile.getAbsolutePath();
+        BufferedWriter currentFileWriter;
+        try {
+            currentFileWriter = new BufferedWriter(new FileWriter(currentFile));
+        } catch (IOException e) {
+            logException("could not open file: " + currentFilePath, e);
+            return 0;
+        }
+        if (mRawFileWriter != null) {
+            try {
+                mRawFileWriter.close();
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+                return 0;
+            }
+        }
+        mRawFile = currentFile;
+        mRawFileWriter = currentFileWriter;
+        return 1;
+    }
+
+    private int initPosFileContents() {
+        File file = mContext.getExternalFilesDir("gnss");
+
+        @SuppressLint("SimpleDateFormat") SimpleDateFormat formatter = new SimpleDateFormat("yyy_MM_dd_HH_mm_ss");
+        Date now = new Date();
+        String fileName = String.format("%s_%s.pos", FILE_PREFIX, formatter.format(now));
+        File currentFile = new File(file, fileName);
+        String currentFilePath = currentFile.getAbsolutePath();
+        BufferedWriter currentFileWriter;
+        try {
+            currentFileWriter = new BufferedWriter(new FileWriter(currentFile));
+        } catch (IOException e) {
+            logException("could not open file: " + currentFilePath, e);
+            return 0;
+        }
+        if (mPosFileWriter != null) {
+            try {
+                mPosFileWriter.close();
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+                return 0;
+            }
+        }
+        mPosFile = currentFile;
+        mPosFileWriter = currentFileWriter;
+        return 1;
+    }
+
+    private int initNLPFileContents() {
+        File file = mContext.getExternalFilesDir("gnss");
+
+        @SuppressLint("SimpleDateFormat") SimpleDateFormat formatter = new SimpleDateFormat("yyy_MM_dd_HH_mm_ss");
+        Date now = new Date();
+        String fileName = String.format("%s_%s.nlp", FILE_PREFIX, formatter.format(now));
+        File currentFile = new File(file, fileName);
+        String currentFilePath = currentFile.getAbsolutePath();
+        BufferedWriter currentFileWriter;
+        try {
+            currentFileWriter = new BufferedWriter(new FileWriter(currentFile));
+        } catch (IOException e) {
+            logException("Could not open file: " + currentFilePath, e);
+            return 0;
+        }
+        if (mNLPFileWriter != null) {
+            try {
+                mNLPFileWriter.close();
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+                return 0;
+            }
+        }
+        mNLPFile = currentFile;
+        mNLPFileWriter = currentFileWriter;
+        return 1;
+    }
+
+    private int initNMAFileContents() {
+        File file = mContext.getExternalFilesDir("gnss");
+
+        @SuppressLint("SimpleDateFormat") SimpleDateFormat formatter = new SimpleDateFormat("yyy_MM_dd_HH_mm_ss");
+        Date now = new Date();
+        String fileName = String.format("%s_%s.nma", FILE_PREFIX, formatter.format(now));
+        File currentFile = new File(file, fileName);
+        String currentFilePath = currentFile.getAbsolutePath();
+        BufferedWriter currentFileWriter;
+        try {
+            currentFileWriter = new BufferedWriter(new FileWriter(currentFile));
+        } catch (IOException e) {
+            logException("Could not open file: " + currentFilePath, e);
+            return 0;
+        }
+        if (mNMAFileWriter != null) {
+            try {
+                mNMAFileWriter.close();
+            } catch (IOException e) {
+                logException("unable to close all file streams.", e);
+                return 0;
+            }
+        }
+        mNMAFile = currentFile;
+        mNMAFileWriter = currentFileWriter;
+        return 1;
+    }
+}
